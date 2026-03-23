@@ -1,0 +1,51 @@
+name: Agent Prompt Autoresearch
+
+on:
+  # Fires after the agent opens or updates a PR
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+  # Fires when a reviewer submits a review
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  pull-requests: write   # post evidence block comments
+  contents: read         # read repo files
+  issues: write          # post experiment report comments
+
+jobs:
+  autoresearch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install PyYAML requests
+
+      - name: Run Autoresearch
+        env:
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME:  ${{ github.repository }}
+
+          # PR context
+          PR_NUMBER:       ${{ github.event.pull_request.number }}
+          PR_ACTION:       ${{ github.event.action }}
+          PR_AUTHOR:       ${{ github.event.pull_request.user.login }}
+          PR_TITLE:        ${{ github.event.pull_request.title }}
+          PR_BASE_BRANCH:  ${{ github.event.pull_request.base.ref }}
+          PR_MERGED:       ${{ github.event.pull_request.merged }}
+          PR_BODY:         ${{ github.event.pull_request.body }}
+
+          # Review context
+          REVIEW_STATE:    ${{ github.event.review.state }}
+
+        run: python scripts/autoresearch.py

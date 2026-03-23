@@ -1,0 +1,5 @@
+# Production dependencies
+-r requirements.txt
+
+# Development / testing only
+pytest>=7.0

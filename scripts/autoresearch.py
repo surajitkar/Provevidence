@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""
+autoresearch.py — Agent Prompt Autoresearch Engine
+---------------------------------------------------
+Triggered by GitHub Actions on every PR event.
+
+Responsibilities:
+  1. PR opened/updated  → read autoresearch tag from PR body
+                        → look up which variant was assigned to this task
+                        → call GitHub API to get diff, files, CI status
+                        → generate evidence block, post as PR comment
+                        → record pr_run in state.json
+
+  2. Review submitted   → record review_round_trips in state.json
+
+  3. PR closed          → record merge/close in state.json
+                        → if enough PRs collected → evaluate experiment
+                        → post experiment report as PR comment
+                        → write latest-summary.md
+
+The variant is assigned BEFORE the PR is created, by the agent calling
+scripts/get_variant.py. The tag [autoresearch:task=X:variant=Y] in the
+PR body links the PR back to its variant assignment.
+"""
+
+import os
+import re
+import sys
+import json
+import hashlib
+import datetime
+import requests
+import yaml
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+ROOT             = Path(__file__).parent.parent
+AUTORESEARCH_DIR = ROOT / ".repo-autoresearch"
+EXPERIMENT_FILE  = AUTORESEARCH_DIR / "experiment.yaml"
+STATE_FILE       = AUTORESEARCH_DIR / "reports" / "state.json"
+SUMMARY_FILE     = AUTORESEARCH_DIR / "reports" / "latest-summary.md"
+
+# ---------------------------------------------------------------------------
+# Environment variables (injected by GitHub Actions)
+# ---------------------------------------------------------------------------
+
+GITHUB_TOKEN   = os.environ["GITHUB_TOKEN"]
+REPO           = os.environ.get("REPO_FULL_NAME", "")
+PR_NUMBER      = os.environ.get("PR_NUMBER", "")
+PR_ACTION      = os.environ.get("PR_ACTION", "")
+PR_AUTHOR      = os.environ.get("PR_AUTHOR", "")
+PR_TITLE       = os.environ.get("PR_TITLE", "")
+PR_BASE_BRANCH = os.environ.get("PR_BASE_BRANCH", "main")
+PR_MERGED      = os.environ.get("PR_MERGED", "false").lower() == "true"
+PR_BODY        = os.environ.get("PR_BODY", "")
+REVIEW_STATE   = os.environ.get("REVIEW_STATE", "")
+
+HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+GITHUB_API = "https://api.github.com"
+
+# ---------------------------------------------------------------------------
+# GitHub API helpers
+# ---------------------------------------------------------------------------
+
+def gh_get(path):
+    r = requests.get(f"{GITHUB_API}{path}", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def gh_post(path, body):
+    r = requests.post(f"{GITHUB_API}{path}", headers=HEADERS, json=body, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def gh_patch(path, body):
+    r = requests.patch(f"{GITHUB_API}{path}", headers=HEADERS, json=body, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def post_pr_comment(body):
+    gh_post(f"/repos/{REPO}/issues/{PR_NUMBER}/comments", {"body": body})
+    print(f"  Posted comment on PR #{PR_NUMBER}")
+
+def update_or_create_pr_comment(marker, body):
+    """Update existing bot comment if found, otherwise create new."""
+    comments = gh_get(f"/repos/{REPO}/issues/{PR_NUMBER}/comments")
+    for c in comments:
+        if marker in c.get("body", "") and "bot" in c["user"]["login"].lower():
+            gh_patch(f"/repos/{REPO}/issues/comments/{c['id']}", {"body": body})
+            print(f"  Updated PR comment {c['id']}")
+            return
+    post_pr_comment(body)
+
+def get_pr_details():
+    return gh_get(f"/repos/{REPO}/pulls/{PR_NUMBER}")
+
+def get_pr_files():
+    return gh_get(f"/repos/{REPO}/pulls/{PR_NUMBER}/files")
+
+def get_check_runs():
+    pr  = get_pr_details()
+    sha = pr.get("head", {}).get("sha", "")
+    if not sha:
+        return []
+    return gh_get(f"/repos/{REPO}/commits/{sha}/check-runs").get("check_runs", [])
+
+# ---------------------------------------------------------------------------
+# State management
+# ---------------------------------------------------------------------------
+
+def load_state():
+    if STATE_FILE.exists():
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"pr_runs": {}, "promotion_decisions": []}
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+    print(f"  State saved → {STATE_FILE}")
+
+# ---------------------------------------------------------------------------
+# Experiment config
+# ---------------------------------------------------------------------------
+
+def load_experiment():
+    if not EXPERIMENT_FILE.exists():
+        print("No experiment.yaml — skipping.")
+        sys.exit(0)
+    with open(EXPERIMENT_FILE) as f:
+        return yaml.safe_load(f)
+
+def load_variant_instructions(instruction_pack_ref):
+    path = ROOT / instruction_pack_ref
+    return path.read_text() if path.exists() else ""
+
+def get_variant_by_id(variant_id, experiment):
+    for v in experiment.get("variants", []):
+        if v["id"] == variant_id:
+            return v
+    return None
+
+# ---------------------------------------------------------------------------
+# Variant resolution
+# Reads [autoresearch:task=X:variant=Y] tag from PR body.
+# Falls back to hashing PR number for PRs without a tag.
+# ---------------------------------------------------------------------------
+
+def parse_autoresearch_tag(pr_body):
+    """Returns (task_ref, variant_id) from the tag, or (None, None)."""
+    if not pr_body:
+        return None, None
+    m = re.search(r"\[autoresearch:task=([^:]+):variant=([^\]]+)\]", pr_body)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return None, None
+
+def resolve_variant(pr_body, experiment):
+    """
+    Primary path: read tag from PR body → look up variant.
+    Fallback: hash PR number (for PRs opened without get_variant.py).
+    Returns (variant_dict, task_ref).
+    """
+    task_ref, variant_id = parse_autoresearch_tag(pr_body)
+
+    if variant_id:
+        variant = get_variant_by_id(variant_id, experiment)
+        if variant:
+            print(f"  Tag found → task={task_ref} variant={variant_id}")
+            return variant, task_ref
+        print(f"  Warning: variant '{variant_id}' not in experiment.yaml — falling back")
+
+    # Fallback: is this an AI-generated PR even without a tag?
+    if not is_ai_pr():
+        return None, None
+
+    # Hash the PR number as last resort
+    variants = experiment.get("variants", [])
+    if not variants:
+        return None, None
+    idx = int(hashlib.md5(str(PR_NUMBER).encode()).hexdigest(), 16) % len(variants)
+    print(f"  No tag — fallback hash variant: {variants[idx]['id']}")
+    return variants[idx], None
+
+# ---------------------------------------------------------------------------
+# AI-generated PR detection (used for fallback path only)
+# ---------------------------------------------------------------------------
+
+AI_AGENT_LOGINS = {
+    "copilot", "github-copilot", "copilot[bot]",
+    "cursor", "cursor-ai",
+    "claude", "claude-code", "anthropic-claude",
+    "devin-ai", "devin",
+}
+
+def is_ai_pr():
+    author = PR_AUTHOR.lower()
+    if any(a in author for a in AI_AGENT_LOGINS):
+        return True
+    title = PR_TITLE.lower()
+    if any(s in title for s in ["[ai]", "[copilot]", "[cursor]", "[claude]", "[bot]"]):
+        return True
+    # Any PR with an autoresearch tag counts
+    _, variant_id = parse_autoresearch_tag(PR_BODY)
+    return variant_id is not None
+
+# ---------------------------------------------------------------------------
+# Evidence block generation
+# ---------------------------------------------------------------------------
+
+def compute_risk_indicators(files):
+    touched = [f["filename"] for f in files]
+    patterns = {
+        "money/payment":  ["payment", "checkout", "billing", "pricing", "stripe", "invoice"],
+        "auth/security":  ["auth", "login", "password", "token", "secret", "oauth"],
+        "config/env":     [".env", "config", "settings", "secrets"],
+        "database":       ["migration", "schema", "sql", "db", "database"],
+        "API contract":   ["openapi", "swagger", "routes", "api/v"],
+    }
+    found = [label for label, kws in patterns.items()
+             if any(kw in p.lower() for p in touched for kw in kws)]
+    return found or ["no high-risk areas detected"]
+
+def score_ci_status(check_runs):
+    if not check_runs:
+        return "no CI checks found", False
+    conclusions = [c.get("conclusion") for c in check_runs if c.get("conclusion")]
+    if not conclusions:
+        return f"{len(check_runs)} checks in progress", False
+    failed = [c["name"] for c in check_runs
+              if c.get("conclusion") in ("failure", "timed_out")]
+    passed = [c for c in check_runs if c.get("conclusion") == "success"]
+    if failed:
+        return f"FAILING: {', '.join(failed[:3])}", False
+    return f"all {len(passed)} checks passed", True
+
+def generate_evidence_block(pr, files, check_runs, variant, instructions, task_ref):
+    touched   = [f["filename"] for f in files]
+    additions = sum(f.get("additions", 0) for f in files)
+    deletions = sum(f.get("deletions", 0) for f in files)
+    risk      = compute_risk_indicators(files)
+    ci_summary, ci_ok = score_ci_status(check_runs)
+    ci_icon   = "✅" if ci_ok else "⚠️"
+    test_files = [f for f in touched if "test" in f.lower() or "spec" in f.lower()]
+
+    missing = []
+    if not test_files:
+        missing.append("no test files modified")
+    if additions > 300:
+        missing.append("large diff — consider splitting")
+    if not pr.get("body") or len(pr.get("body", "")) < 50:
+        missing.append("PR description is thin")
+
+    task_row = f"\n| **Task** | `{task_ref}` |" if task_ref else ""
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""<!-- AUTORESEARCH_EVIDENCE_BLOCK -->
+## Change Evidence
+
+| Field | Value |
+|-------|-------|
+| **Variant** | `{variant.get('id', 'unknown')}` |{task_row}
+| **Intent** | {pr.get('title', '')} |
+| **Files changed** | {len(touched)} (+{additions} / -{deletions} lines) |
+| **Touched areas** | `{"`, `".join(touched[:5])}{"..." if len(touched) > 5 else ""}` |
+| **Risk indicators** | {', '.join(risk)} |
+| **CI status** | {ci_icon} {ci_summary} |
+| **Test coverage** | {"✅ " + str(len(test_files)) + " test file(s) touched" if test_files else "⚠️ no test files found"} |
+| **Missing evidence** | {', '.join(missing) if missing else 'none'} |
+
+<details>
+<summary>Active instructions: <code>{variant.get('id', 'unknown')}</code></summary>
+
+{instructions or "_No instructions loaded._"}
+
+</details>
+
+---
+*[Agent Prompt Autoresearch](https://github.com/{REPO}) · variant `{variant.get('id', '')}` · {ts}*
+"""
+
+# ---------------------------------------------------------------------------
+# Outcome recording
+# ---------------------------------------------------------------------------
+
+def record_outcome(state, pr_number, event, data):
+    key = str(pr_number)
+    if key not in state["pr_runs"]:
+        state["pr_runs"][key] = {
+            "pr_number":             pr_number,
+            "variant_id":            data.get("variant_id"),
+            "task_ref":              data.get("task_ref"),
+            "author":                data.get("author"),
+            "base_branch":           data.get("base_branch"),
+            "opened_at":             data.get("opened_at"),
+            "events":                [],
+            "review_round_trips":    0,
+            "first_pass_ci_success": None,
+            "merged_at":             None,
+        }
+    run = state["pr_runs"][key]
+    run["events"].append({
+        "event": event,
+        "ts": datetime.datetime.utcnow().isoformat(),
+        **{k: v for k, v in data.items() if k != "opened_at"},
+    })
+    if event == "ci_result" and run["first_pass_ci_success"] is None:
+        run["first_pass_ci_success"] = data.get("ci_ok", False)
+    if event == "review_submitted" and data.get("review_state") == "changes_requested":
+        run["review_round_trips"] = run.get("review_round_trips", 0) + 1
+    if event == "merged":
+        run["merged_at"] = datetime.datetime.utcnow().isoformat()
+
+# ---------------------------------------------------------------------------
+# Experiment evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_experiment(state, experiment):
+    variants  = experiment.get("variants", [])
+    if len(variants) < 2:
+        return None
+
+    min_prs   = experiment.get("evaluation_window", {}).get("value", 20)
+    primary   = experiment.get("primary_metric", "review_round_trips")
+    threshold = experiment.get("promotion_threshold_pct", 15)
+
+    by_variant = {}
+    for run in state.get("pr_runs", {}).values():
+        by_variant.setdefault(run.get("variant_id"), []).append(run)
+
+    baseline_id   = variants[0]["id"]
+    baseline_runs = by_variant.get(baseline_id, [])
+
+    if len(baseline_runs) < min_prs:
+        print(f"  Not enough data: baseline has {len(baseline_runs)}/{min_prs} PRs")
+        return None
+
+    def stats(runs):
+        metric = [r.get(primary, 0) for r in runs if r.get(primary) is not None]
+        ci     = [r.get("first_pass_ci_success", False) for r in runs]
+        return {
+            "count":        len(runs),
+            "avg_metric":   sum(metric) / len(metric) if metric else 0,
+            "ci_pass_rate": sum(ci) / len(ci) if ci else 0,
+        }
+
+    base      = stats(baseline_runs)
+    decisions = []
+
+    for v in variants[1:]:
+        vid  = v["id"]
+        runs = by_variant.get(vid, [])
+        if not runs:
+            continue
+        chal   = stats(runs)
+        improv = ((base["avg_metric"] - chal["avg_metric"]) / base["avg_metric"] * 100
+                  if base["avg_metric"] > 0 else 0)
+        ci_drop      = base["ci_pass_rate"] - chal["ci_pass_rate"]
+        guardrail_ok = ci_drop <= 0.03
+        decisions.append({
+            "variant_id":       vid,
+            "baseline_id":      baseline_id,
+            "improvement_pct":  round(improv, 1),
+            "promote":          improv >= threshold and guardrail_ok,
+            "guardrail_ok":     guardrail_ok,
+            "guardrail_notes":  ([f"CI pass rate dropped {ci_drop:.1%} (limit: 3%)"]
+                                 if not guardrail_ok else []),
+            "baseline_stats":   base,
+            "challenger_stats": chal,
+        })
+    return decisions or None
+
+def generate_report(decisions, experiment):
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        "# Autoresearch Experiment Report",
+        f"**Experiment:** `{experiment.get('name', 'unnamed')}`  ",
+        f"**Generated:** {ts}",
+        "",
+    ]
+    for d in decisions:
+        icon = "PROMOTE" if d["promote"] else "REJECT"
+        lines += [
+            f"## {icon}: `{d['variant_id']}` vs `{d['baseline_id']}`",
+            "",
+            f"- **Improvement:** {d['improvement_pct']:+.1f}%"
+            f" (need ≥{experiment.get('promotion_threshold_pct', 15)}%)",
+            f"- **Guardrails:** {'passed' if d['guardrail_ok'] else 'FAILED — ' + '; '.join(d['guardrail_notes'])}",
+            f"- **Baseline:** {d['baseline_stats']['count']} PRs,"
+            f" avg {d['baseline_stats']['avg_metric']:.2f} review rounds,"
+            f" {d['baseline_stats']['ci_pass_rate']:.1%} CI pass rate",
+            f"- **Challenger:** {d['challenger_stats']['count']} PRs,"
+            f" avg {d['challenger_stats']['avg_metric']:.2f} review rounds,"
+            f" {d['challenger_stats']['ci_pass_rate']:.1%} CI pass rate",
+            "",
+        ]
+        if d["promote"]:
+            lines.append(
+                f"> **Recommendation:** replace `{d['baseline_id']}` with"
+                f" `{d['variant_id']}` as the new baseline. "
+                f"Copy `.repo-autoresearch/variants/{d['variant_id'].replace('_','-')}.md`"
+                f" to `variants/baseline.md` and update `experiment.yaml`."
+            )
+        else:
+            lines.append(
+                f"> **Recommendation:** keep `{d['baseline_id']}`."
+                f" `{d['variant_id']}` did not meet the promotion threshold."
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    print(f"\nAutoresearch — PR #{PR_NUMBER} action={PR_ACTION} author={PR_AUTHOR}")
+
+    if not PR_NUMBER:
+        print("No PR context — skipping.")
+        return
+
+    experiment = load_experiment()
+    state      = load_state()
+
+    target_branches = experiment.get("cohort", {}).get("target_branches", ["main"])
+    if PR_BASE_BRANCH not in target_branches:
+        print(f"  Branch '{PR_BASE_BRANCH}' not in scope — skipping.")
+        return
+
+    # ------------------------------------------------------------------
+    # PR opened or updated — generate and post evidence block
+    # ------------------------------------------------------------------
+    if PR_ACTION in ("opened", "synchronize", "reopened"):
+
+        variant, task_ref = resolve_variant(PR_BODY, experiment)
+        if not variant:
+            print("  Not an autoresearch PR — skipping.")
+            return
+
+        instructions = load_variant_instructions(variant.get("instruction_pack", ""))
+        pr           = get_pr_details()
+        files        = get_pr_files()
+        check_runs   = get_check_runs()
+
+        evidence = generate_evidence_block(
+            pr, files, check_runs, variant, instructions, task_ref
+        )
+        update_or_create_pr_comment("AUTORESEARCH_EVIDENCE_BLOCK", evidence)
+
+        _, ci_ok = score_ci_status(check_runs)
+        record_outcome(state, PR_NUMBER, "opened", {
+            "variant_id":    variant["id"],
+            "task_ref":      task_ref,
+            "author":        PR_AUTHOR,
+            "base_branch":   PR_BASE_BRANCH,
+            "opened_at":     datetime.datetime.utcnow().isoformat(),
+            "files_changed": len(files),
+        })
+        record_outcome(state, PR_NUMBER, "ci_result", {"ci_ok": ci_ok})
+
+    # ------------------------------------------------------------------
+    # Review submitted — record round trip
+    # ------------------------------------------------------------------
+    elif PR_ACTION == "submitted" and REVIEW_STATE:
+        record_outcome(state, PR_NUMBER, "review_submitted",
+                       {"review_state": REVIEW_STATE})
+        print(f"  Recorded review: {REVIEW_STATE}")
+
+    # ------------------------------------------------------------------
+    # PR closed — record outcome and maybe evaluate experiment
+    # ------------------------------------------------------------------
+    elif PR_ACTION == "closed":
+        event = "merged" if PR_MERGED else "closed_unmerged"
+        record_outcome(state, PR_NUMBER, event, {})
+        print(f"  PR #{PR_NUMBER} {event}")
+
+        decisions = evaluate_experiment(state, experiment)
+        if decisions:
+            report = generate_report(decisions, experiment)
+            SUMMARY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SUMMARY_FILE.write_text(report)
+            post_pr_comment(f"## Autoresearch Experiment Report\n\n{report}")
+            state["promotion_decisions"].append({
+                "decisions":       decisions,
+                "evaluated_at":    datetime.datetime.utcnow().isoformat(),
+                "experiment_name": experiment.get("name"),
+            })
+            print("  Experiment evaluated — report posted.")
+
+    save_state(state)
+    print("  Done.\n")
+
+if __name__ == "__main__":
+    main()

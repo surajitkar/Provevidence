@@ -1,0 +1,46 @@
+# Agent Prompt Autoresearch — Experiment Configuration
+# -------------------------------------------------------
+# This is the only file you need to edit to run an experiment.
+# Everything else runs automatically.
+
+name: review-churn-reduction-v1
+
+cohort:
+  # Which branches to watch for AI-generated PRs
+  target_branches:
+    - main
+    - master
+
+# The metric you are optimising.
+# Options: review_round_trips | first_pass_ci_success | time_to_merge
+primary_metric: review_round_trips
+
+# Guardrails — the challenger must NOT violate these to be promoted.
+guardrails:
+  - first_pass_ci_success >= baseline - 0.03   # CI pass rate must not drop >3%
+  - revert_rate_7d <= baseline + 0.01           # Revert rate must not rise >1%
+
+# How many PRs per variant to collect before evaluating.
+# Raise to 20+ in production. Keep at 5 for initial testing.
+evaluation_window:
+  type: pr_count
+  value: 20
+
+# Challenger must beat baseline by this % to be promoted.
+promotion_threshold_pct: 15
+
+# Variants — first entry is always the baseline (control group).
+# Add more challengers by adding more entries here.
+variants:
+  - id: baseline
+    instruction_pack: .repo-autoresearch/variants/baseline.md
+    evidence_template: .repo-autoresearch/evidence-templates/standard.md
+
+  - id: compact_diff_v1
+    instruction_pack: .repo-autoresearch/variants/compact-diff.md
+    evidence_template: .repo-autoresearch/evidence-templates/standard.md
+
+  # Example: add a third variant when compact_diff_v1 becomes the new baseline
+  # - id: compact_diff_v2
+  #   instruction_pack: .repo-autoresearch/variants/compact-diff-v2.md
+  #   evidence_template: .repo-autoresearch/evidence-templates/standard.md
