@@ -11,6 +11,12 @@ cohort:
     - main
     - master
 
+# Optional: which GitHub Check Runs to store in Gist state under each pr_run.ci_checks.
+# If include_name_substrings is empty or omitted, every check run returned for the
+# commit is recorded (same jobs you see on the PR Checks tab).
+ci_tracking:
+  include_name_substrings: []
+
 # The metric you are optimising.
 # Options: review_round_trips | first_pass_ci_success | time_to_merge
 primary_metric: review_round_trips

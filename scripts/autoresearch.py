@@ -110,12 +110,46 @@ def get_pr_details():
 def get_pr_files():
     return gh_get(f"/repos/{REPO}/pulls/{PR_NUMBER}/files")
 
-def get_check_runs():
-    pr  = get_pr_details()
-    sha = pr.get("head", {}).get("sha", "")
-    if not sha:
+def get_check_runs_for_sha(sha):
+    """Return check runs for a commit SHA (same jobs GitHub shows on the PR checks UI)."""
+    if not sha or not REPO:
         return []
-    return gh_get(f"/repos/{REPO}/commits/{sha}/check-runs").get("check_runs", [])
+    data = gh_get(f"/repos/{REPO}/commits/{sha}/check-runs?per_page=100")
+    return data.get("check_runs", [])
+
+
+def get_check_runs():
+    pr = get_pr_details()
+    sha = pr.get("head", {}).get("sha", "")
+    return get_check_runs_for_sha(sha)
+
+
+def filter_check_runs_for_experiment(check_runs, experiment):
+    """
+    Apply optional ci_tracking.include_name_substrings from experiment.yaml.
+    Empty or missing list means: keep all check runs (match configured repo CI).
+    """
+    ci_tracking = experiment.get("ci_tracking") or {}
+    substrings = ci_tracking.get("include_name_substrings") or []
+    if not substrings:
+        return list(check_runs)
+    lowered = [s.lower() for s in substrings]
+    return [
+        c for c in check_runs
+        if any(s in (c.get("name") or "").lower() for s in lowered)
+    ]
+
+
+def serialize_check_runs_for_gist(check_runs):
+    """Stable, JSON-friendly rows for Gist pr_runs.ci_checks."""
+    return [
+        {
+            "name": c.get("name"),
+            "status": c.get("status"),
+            "conclusion": c.get("conclusion"),
+        }
+        for c in check_runs
+    ]
 
 # ---------------------------------------------------------------------------
 # State management — GitHub Gist backend
@@ -475,6 +509,9 @@ def handle_check_suite():
     Finds the PR run(s) associated with this commit SHA and writes
     the real first_pass_ci_success value into the Gist.
 
+    Also writes ci_checks: one row per configured GitHub Check Run (filtered by
+    experiment ci_tracking), so the Gist mirrors the PR checks UI.
+
     This fires AFTER the PR-open event, so it overwrites the
     speculative False that was recorded when the PR first opened.
     """
@@ -494,25 +531,45 @@ def handle_check_suite():
         print(f"  check_suite completed ({CHECK_CONCLUSION}) but no linked PRs — skipping")
         return
 
+    experiment = load_experiment()
+    try:
+        raw_runs = get_check_runs_for_sha(CHECK_SHA)
+    except Exception as e:
+        print(f"  Warning: could not load check runs for {CHECK_SHA[:8]}…: {e}")
+        raw_runs = []
+    filtered = filter_check_runs_for_experiment(raw_runs, experiment)
+    ci_rows = serialize_check_runs_for_gist(filtered)
+    recorded_at = datetime.datetime.utcnow().isoformat()
+
     state = load_state()
-    updated = []
+    updated_first_pass = []
+    matched_pr = []
 
     for pr_num in pr_numbers:
-        if pr_num in state["pr_runs"]:
-            run = state["pr_runs"][pr_num]
-            # Only record if this is the first CI result for this PR
-            # (first_pass = was CI green on the very first full run)
-            if run.get("first_pass_ci_success") is None or not run.get("ci_finalised"):
-                run["first_pass_ci_success"] = ci_passed
-                run["ci_finalised"] = True
-                run["ci_conclusion"] = CHECK_CONCLUSION
-                updated.append(pr_num)
+        if pr_num not in state["pr_runs"]:
+            continue
+        run = state["pr_runs"][pr_num]
+        matched_pr.append(pr_num)
+        run["ci_checks"] = ci_rows
+        run["ci_checks_sha"] = CHECK_SHA
+        run["ci_checks_recorded_at"] = recorded_at
 
-    if updated:
+        # First full suite result for experiment metrics (unchanged semantics)
+        if run.get("first_pass_ci_success") is None or not run.get("ci_finalised"):
+            run["first_pass_ci_success"] = ci_passed
+            run["ci_finalised"] = True
+            run["ci_conclusion"] = CHECK_CONCLUSION
+            updated_first_pass.append(pr_num)
+
+    if matched_pr:
         save_state(state)
-        print(f"  CI result '{CHECK_CONCLUSION}' recorded for PR(s): {updated}")
+        n = len(ci_rows)
+        print(
+            f"  CI checks ({n}) + conclusion '{CHECK_CONCLUSION}' for PR(s): {matched_pr} "
+            f"(first_pass updated: {updated_first_pass})"
+        )
     else:
-        print(f"  check_suite completed but no matching open PR runs found")
+        print(f"  check_suite completed but no matching PR runs in state")
 
 # ---------------------------------------------------------------------------
 # Main
