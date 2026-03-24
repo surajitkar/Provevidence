@@ -76,7 +76,7 @@ def main():
             print("Raise the PR normally without a tag.")
         sys.exit(0)
 
-    with open(EXPERIMENT_FILE) as f:
+    with open(EXPERIMENT_FILE, encoding="utf-8") as f:
         experiment = yaml.safe_load(f)
 
     task_key = slugify(args.task)
