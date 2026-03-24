@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import json
+import time
 import hashlib
 import datetime
 import requests
@@ -203,36 +204,56 @@ def _load_state_gist():
         print(f"  Could not load Gist state: {e} — starting fresh")
         return {"pr_runs": {}, "promotion_decisions": []}
 
+def _merge_gist_state(latest, pending):
+    """Merge pending in-memory state with latest Gist JSON (concurrent-run safe)."""
+    merged_runs = {**latest.get("pr_runs", {}), **pending.get("pr_runs", {})}
+    existing_ts = {d.get("evaluated_at") for d in latest.get("promotion_decisions", [])}
+    merged_decisions = list(latest.get("promotion_decisions", []))
+    for d in pending.get("promotion_decisions", []):
+        if d.get("evaluated_at") not in existing_ts:
+            merged_decisions.append(d)
+    return {**pending, "pr_runs": merged_runs, "promotion_decisions": merged_decisions}
+
+
 def _save_state_gist(state):
     """
     Re-read Gist immediately before writing to merge any changes
     made by a concurrent Action run since we loaded state at job start.
-    """
-    try:
-        r = requests.get(
-            f"https://api.github.com/gists/{GIST_ID}",
-            headers=GIST_HEADERS, timeout=15
-        )
-        r.raise_for_status()
-        latest = json.loads(r.json()["files"][GIST_FILE]["content"])
-        merged_runs = {**latest.get("pr_runs", {}), **state.get("pr_runs", {})}
-        existing_ts = {d.get("evaluated_at") for d in latest.get("promotion_decisions", [])}
-        merged_decisions = latest.get("promotion_decisions", [])
-        for d in state.get("promotion_decisions", []):
-            if d.get("evaluated_at") not in existing_ts:
-                merged_decisions.append(d)
-        state = {**state, "pr_runs": merged_runs, "promotion_decisions": merged_decisions}
-    except Exception as e:
-        print(f"  Warning: could not re-read Gist before save: {e}")
 
-    r = requests.patch(
-        f"https://api.github.com/gists/{GIST_ID}",
-        headers=GIST_HEADERS,
-        json={"files": {GIST_FILE: {"content": json.dumps(state, indent=2, default=str)}}},
-        timeout=15
-    )
-    r.raise_for_status()
-    print(f"  State saved to Gist {GIST_ID[:8]}… ({len(state.get('pr_runs', {}))} PR runs)")
+    Retries on HTTP 409 Conflict when two Actions patch the Gist concurrently.
+    """
+    max_attempts = 5
+    base_delay_s = 0.5
+    pending = state
+
+    for attempt in range(max_attempts):
+        merged = pending
+        try:
+            r = requests.get(
+                f"https://api.github.com/gists/{GIST_ID}",
+                headers=GIST_HEADERS, timeout=15
+            )
+            r.raise_for_status()
+            latest = json.loads(r.json()["files"][GIST_FILE]["content"])
+            merged = _merge_gist_state(latest, pending)
+        except Exception as e:
+            print(f"  Warning: could not re-read Gist before save: {e}")
+
+        r = requests.patch(
+            f"https://api.github.com/gists/{GIST_ID}",
+            headers=GIST_HEADERS,
+            json={"files": {GIST_FILE: {"content": json.dumps(merged, indent=2, default=str)}}},
+            timeout=15
+        )
+        if r.status_code == 409:
+            if attempt < max_attempts - 1:
+                delay = base_delay_s * (2**attempt)
+                print(f"  Gist save conflict (409), retrying in {delay:.1f}s ({attempt + 1}/{max_attempts})…")
+                time.sleep(delay)
+                continue
+        r.raise_for_status()
+        print(f"  State saved to Gist {GIST_ID[:8]}… ({len(merged.get('pr_runs', {}))} PR runs)")
+        return
 
 def _load_state_file():
     if STATE_FILE.exists():
