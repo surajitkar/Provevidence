@@ -1,7 +1,6 @@
 """Simple Hello World entry point."""
 
-# some comment
-# some comment
+import random
 
 # some comment
 # some comment
@@ -14,6 +13,25 @@
 
 # some comment
 # some comment
+
+# some comment
+# some comment
+
+_PLANETS = (
+    "Mercury",
+    "Venus",
+    "Earth",
+    "Mars",
+    "Jupiter",
+    "Saturn",
+    "Uranus",
+    "Neptune",
+)
+
+
+def hello_welcome_planet() -> None:
+    planet = random.choice(_PLANETS)
+    print(f"hello welcome to {planet}")
 
 
 def hello_universe() -> None:
