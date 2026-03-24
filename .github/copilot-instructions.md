@@ -30,3 +30,8 @@ It looks like:
 
 This tag is required for experiment tracking. Without it the PR cannot
 be attributed to the correct variant and the experiment data is lost.
+
+## Before raising any PR |  IMPORTANT 
+
+Follow every rule it prints. Include the tag in the PR body.
+This is mandatory for all tasks in this repo.
