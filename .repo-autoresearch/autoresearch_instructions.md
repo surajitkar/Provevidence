@@ -1,6 +1,6 @@
 # Autoresearch — active instructions
 # Variant : baseline
-# Task    : PROJ-142
+# Task    : create app folder hello world python
 
 # Baseline Instructions for AI-Generated Pull Requests
 
@@ -31,4 +31,4 @@ Make sure CI passes before requesting review.
 
 ---
 Include this tag in your PR body:
-[autoresearch:task=PROJ-142:variant=baseline]
+[autoresearch:task=create app folder hello world python:variant=baseline]
