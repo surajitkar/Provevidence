@@ -5,6 +5,8 @@ on:
     types: [opened, synchronize, reopened, closed]
   pull_request_review:
     types: [submitted]
+  check_suite:
+    types: [completed]
 
 permissions:
   pull-requests: write
@@ -25,16 +27,26 @@ jobs:
 
       - name: Run Autoresearch
         env:
-          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
-          REPO_FULL_NAME:  ${{ github.repository }}
-          GIST_ID:         ${{ secrets.GIST_ID }}
-          GIST_TOKEN:      ${{ secrets.GIST_TOKEN }}
-          PR_NUMBER:       ${{ github.event.pull_request.number }}
-          PR_ACTION:       ${{ github.event.action }}
-          PR_AUTHOR:       ${{ github.event.pull_request.user.login }}
-          PR_TITLE:        ${{ github.event.pull_request.title }}
-          PR_BASE_BRANCH:  ${{ github.event.pull_request.base.ref }}
-          PR_MERGED:       ${{ github.event.pull_request.merged }}
-          PR_BODY:         ${{ github.event.pull_request.body }}
-          REVIEW_STATE:    ${{ github.event.review.state }}
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME:    ${{ github.repository }}
+          GIST_ID:           ${{ secrets.GIST_ID }}
+          GIST_TOKEN:        ${{ secrets.GIST_TOKEN }}
+
+          # PR context
+          PR_NUMBER:         ${{ github.event.pull_request.number }}
+          PR_ACTION:         ${{ github.event.action }}
+          PR_AUTHOR:         ${{ github.event.pull_request.user.login }}
+          PR_TITLE:          ${{ github.event.pull_request.title }}
+          PR_BASE_BRANCH:    ${{ github.event.pull_request.base.ref }}
+          PR_MERGED:         ${{ github.event.pull_request.merged }}
+          PR_BODY:           ${{ github.event.pull_request.body }}
+
+          # Review context
+          REVIEW_STATE:      ${{ github.event.review.state }}
+
+          # CI context — fires when check_suite completes
+          CHECK_SHA:         ${{ github.event.check_suite.head_sha }}
+          CHECK_CONCLUSION:  ${{ github.event.check_suite.conclusion }}
+          CHECK_PR_NUMBERS:  ${{ toJSON(github.event.check_suite.pull_requests) }}
+
         run: python scripts/autoresearch.py

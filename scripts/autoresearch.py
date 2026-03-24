@@ -58,6 +58,12 @@ PR_MERGED      = os.environ.get("PR_MERGED", "false").lower() == "true"
 PR_BODY        = os.environ.get("PR_BODY", "")
 REVIEW_STATE   = os.environ.get("REVIEW_STATE", "")
 
+# CI context — populated on check_suite:completed events
+CHECK_SHA        = os.environ.get("CHECK_SHA", "")
+CHECK_CONCLUSION = os.environ.get("CHECK_CONCLUSION", "")
+CHECK_PR_NUMBERS = os.environ.get("CHECK_PR_NUMBERS", "[]")
+
+
 HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json",
@@ -460,11 +466,66 @@ def generate_report(decisions, experiment):
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
+# Check suite handling
+# ---------------------------------------------------------------------------
+
+def handle_check_suite():
+    """
+    Fired when GitHub check_suite completes — i.e. when CI finishes.
+    Finds the PR run(s) associated with this commit SHA and writes
+    the real first_pass_ci_success value into the Gist.
+
+    This fires AFTER the PR-open event, so it overwrites the
+    speculative False that was recorded when the PR first opened.
+    """
+    if not CHECK_SHA or not CHECK_CONCLUSION:
+        return
+
+    ci_passed = CHECK_CONCLUSION == "success"
+
+    # Parse the PR numbers GitHub attached to this check_suite
+    try:
+        pr_list = json.loads(CHECK_PR_NUMBERS)
+        pr_numbers = [str(pr["number"]) for pr in pr_list if pr.get("number")]
+    except Exception:
+        pr_numbers = []
+
+    if not pr_numbers:
+        print(f"  check_suite completed ({CHECK_CONCLUSION}) but no linked PRs — skipping")
+        return
+
+    state = load_state()
+    updated = []
+
+    for pr_num in pr_numbers:
+        if pr_num in state["pr_runs"]:
+            run = state["pr_runs"][pr_num]
+            # Only record if this is the first CI result for this PR
+            # (first_pass = was CI green on the very first full run)
+            if run.get("first_pass_ci_success") is None or not run.get("ci_finalised"):
+                run["first_pass_ci_success"] = ci_passed
+                run["ci_finalised"] = True
+                run["ci_conclusion"] = CHECK_CONCLUSION
+                updated.append(pr_num)
+
+    if updated:
+        save_state(state)
+        print(f"  CI result '{CHECK_CONCLUSION}' recorded for PR(s): {updated}")
+    else:
+        print(f"  check_suite completed but no matching open PR runs found")
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     print(f"\nAutoresearch — PR #{PR_NUMBER} action={PR_ACTION} author={PR_AUTHOR}")
+
+    # check_suite event — CI finished, record the real result
+    if CHECK_SHA:
+        handle_check_suite()
+        return
+
     if not PR_NUMBER:
         print("No PR context — skipping.")
         return
@@ -488,7 +549,8 @@ def main():
         check_runs   = get_check_runs()
         evidence = generate_evidence_block(pr, files, check_runs, variant, instructions, task_ref)
         update_or_create_pr_comment("AUTORESEARCH_EVIDENCE_BLOCK", evidence)
-        _, ci_ok = score_ci_status(check_runs)
+
+        # Record the PR run — ci_pass left as None until check_suite fires
         record_outcome(state, PR_NUMBER, "opened", {
             "variant_id":    variant["id"],
             "task_ref":      task_ref,
@@ -497,10 +559,12 @@ def main():
             "opened_at":     datetime.datetime.utcnow().isoformat(),
             "files_changed": len(files),
         })
-        record_outcome(state, PR_NUMBER, "ci_result", {"ci_ok": ci_ok})
+        # Note: first_pass_ci_success is NOT set here anymore.
+        # It will be set accurately when check_suite:completed fires.
 
     elif PR_ACTION == "submitted" and REVIEW_STATE:
-        record_outcome(state, PR_NUMBER, "review_submitted", {"review_state": REVIEW_STATE})
+        record_outcome(state, PR_NUMBER, "review_submitted",
+                       {"review_state": REVIEW_STATE})
         print(f"  Recorded review: {REVIEW_STATE}")
 
     elif PR_ACTION == "closed":
