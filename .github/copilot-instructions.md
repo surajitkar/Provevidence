@@ -30,3 +30,13 @@ It looks like:
 
 This tag is required for experiment tracking. Without it the PR cannot
 be attributed to the correct variant and the experiment data is lost.
+
+Then read the instructions written to:
+
+```
+.repo-autoresearch/autoresearch_instructions.md
+```
+
+Follow every rule in that file when writing the code.
+
+
