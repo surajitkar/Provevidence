@@ -2,9 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Agent PR workflow (same as Copilot & Cursor)
+
+For the step-by-step flow, **[AGENT.md](AGENT.md)** is the short source of truth. In summary:
+
+1. From the **repo root**, run `python scripts/get_variant.py --task "<ticket-or-description>"` **before** writing code.
+2. Follow what it prints; it writes **`.repo-autoresearch/autoresearch_instructions.md`** (active slice from **`.repo-autoresearch/program.md`** variant sections, or fallback files under `variants/`).
+3. Put the printed **`[autoresearch:task=…:variant=…]`** tag at the end of the **PR body** (required for experiment tracking).
+
+Copilot and Cursor load [`.github/copilot-instructions.md`](.github/copilot-instructions.md) and [`.cursor/rules/autoresearch.mdc`](.cursor/rules/autoresearch.mdc); those files **only reference** `AGENT.md` so the workflow is not duplicated.
+
+---
+
 ## What This Project Does
 
-**Agent Prompt Autoresearch** is a multivariate testing framework for AI-generated pull requests. It determines which agent instruction packs reduce review churn on a specific codebase through controlled A/B experiments — half of AI-generated PRs use instruction set A (baseline), half use instruction set B (challenger), then it measures which produced fewer review round trips and better CI pass rates.
+**Agent Prompt Autoresearch** is a multivariate testing framework for AI-generated pull requests. It determines which agent instruction packs reduce review churn on a specific codebase through controlled A/B experiments — baseline vs challenger variants, then measures review round trips and CI outcomes.
+
+This repo is **not** [karpathy/autoresearch](https://github.com/karpathy/autoresearch) (LLM training). Same name pattern; different purpose (PR instruction experiments).
 
 ## Commands
 
@@ -15,9 +29,15 @@ pip install -r requirements-dev.txt
 # Run tests
 pytest
 
-# Assign a variant before writing code (agents must call this first)
+# Assign a variant before writing code (required first step for PR work)
 python scripts/get_variant.py --task "PROJ-142"
 python scripts/get_variant.py --task "PROJ-142" --quiet   # tag only
+
+# Scaffold autoresearch into another repo (after pip install)
+# autoresearch-init --with-workflow
+
+# Optional: draft a new challenger from evaluation summary (OPENAI_API_KEY optional)
+# draft-challenger
 
 # Local simulation (no GitHub token needed)
 python scripts/setup_test_repo.py --simulate
@@ -27,46 +47,39 @@ export GITHUB_TOKEN=ghp_your_token
 python scripts/setup_test_repo.py --repo yourname/test-autoresearch
 ```
 
-CLI entry points (after `pip install -e .`): `get-variant`, `autoresearch`, `setup-test-repo`.
+CLI entry points (after `pip install -e .`): `get-variant`, `autoresearch`, `setup-test-repo`, `autoresearch-init`, `draft-challenger`.
 
 ## Architecture
 
 ### Three-Script Core
 
-**`scripts/get_variant.py`** — Called by AI agents *before* writing code. MD5-hashes the task reference, selects a variant via `hash % variant_count`, writes instructions to `/tmp/autoresearch_instructions.md`, and emits a tracking tag: `[autoresearch:task=PROJ-142:variant=compact_diff_v1]`. The same task always gets the same variant (deterministic, no randomness).
+**`scripts/get_variant.py`** — Called by AI agents *before* writing code. Hashes the task reference, selects a variant deterministically, writes instructions to **`.repo-autoresearch/autoresearch_instructions.md`**, and emits a tracking tag. The same task always gets the same variant.
 
-**`scripts/autoresearch.py`** — GitHub Actions engine triggered on PR open/update/close and review events. It reads the autoresearch tag from the PR body to identify the variant, posts an auto-generated evidence block as a PR comment, and records outcomes in `.repo-autoresearch/reports/state.json`. When a PR closes and enough data is collected (default: 20 PRs per variant), it runs the experiment evaluation and posts a promotion recommendation.
+**`scripts/autoresearch.py`** — GitHub Actions engine triggered on PR open/update/close, review events, and `check_suite` completion. Reads the autoresearch tag from the PR body, posts an evidence block, and records outcomes (typically in a **GitHub Gist** when configured, else local state file).
 
 **`scripts/setup_test_repo.py`** — Two modes: `--simulate` creates fake PR data locally; `--repo X/Y` creates a real GitHub repo and opens test PRs.
 
 ### Experiment Configuration
 
-`.repo-autoresearch/experiment.yaml` — **Edit this to configure experiments.** Key fields:
-- `variants` — array of instruction packs (first = baseline/control)
-- `primary_metric` — what to optimize (default: `review_round_trips`)
-- `evaluation_window.value` — PRs per variant before evaluating (default: 20)
-- `promotion_threshold_pct` — improvement % needed to promote (default: 15%)
+**`.repo-autoresearch/experiment.yaml`** — Configure variants, metrics, `instruction_source` (default: sections in **`program.md`**), optional `compliance` and `ci_tracking`.
 
-Variant instruction files live in `.repo-autoresearch/variants/` (e.g., `baseline.md`, `compact-diff.md`).
+Variant text: **`program.md`** (`<!-- VARIANT: id -->` sections) with **`variants/*.md`** as fallback when a section is missing. Promotion workflow: **`PROMOTION.md`**.
 
 ### State & Reporting
 
-`.repo-autoresearch/reports/state.json` tracks every PR run: variant, task ref, review round trips, first-pass CI success, merge time. `latest-summary.md` is auto-generated after each evaluation.
+Outcomes are stored in configured backend (Gist JSON or local `state.json`). **`latest-summary.md`** is generated when evaluations run.
 
 ### Skill Integration
 
-`skill/SKILL.md` defines a Claude Code skill (`autoresearch-pr`) that agents invoke for any PR task. The 6-step workflow: extract task ref → run `get_variant.py` → read instructions → write code following them → open PR with tracking tag → confirm to user. Fallback instructions for when the script is unavailable: `skill/references/fallback.md`.
+**`skill/SKILL.md`** defines a Claude Code skill (`autoresearch-pr`). Fallback when the script is unavailable: **`skill/references/fallback.md`**.
 
 ### GitHub Actions Workflow
 
-`.github/workflows/autoresearch.yml` — triggers on `pull_request` (opened, synchronize, reopened, closed) and `pull_request_review`. Requires `pull-requests: write`, `contents: read`, `issues: write` permissions. Calls `scripts/autoresearch.py` with PR metadata from GitHub context env vars.
-
-`.github/copilot-instructions.md` — permanent instructions directing AI agents to run `get_variant.py` before writing any code.
+**`.github/workflows/autoresearch.yml`** — triggers on PR events, reviews, and `check_suite: completed`. Requires secrets **`GIST_ID`** and **`GIST_TOKEN`** for Gist-backed state.
 
 ### Key Design Constraints
 
-- **Hash the task ref, not PR number** — task ref exists before the agent writes code; PR number only exists after.
-- **Variant tag in PR body** — explicit, auditable link; no shared state, no race conditions.
-- **Instructions output path** — written to `.repo-autoresearch/autoresearch_instructions.md` (relative to project root, works cross-platform).
-- **Python ≥3.10 required** (`.python-version` specifies 3.11).
-- **No test files exist yet** — `pytest` is configured in `pyproject.toml` but the test suite is not yet written.
+- **Hash the task ref, not PR number** — task ref exists before the agent writes code.
+- **Variant tag in PR body** — explicit link for attribution.
+- **Instructions path** — `.repo-autoresearch/autoresearch_instructions.md` at repo root.
+- **Python ≥3.10** (see `.python-version`).

@@ -20,8 +20,7 @@ compatibility: "Claude Code, GitHub Copilot — any agent that opens GitHub PRs"
 # Autoresearch PR Skill
 
 Wraps the standard PR workflow with variant assignment at the front
-and a tracking tag at the end. Ensures every PR is attributed to the
-correct experiment variant before a single line of code is written.
+and a tracking tag at the end. **Canonical steps** live in **`AGENT.md`** at the repository root — follow that file to avoid drift; this skill expands with examples and edge cases.
 
 ## Workflow — follow these steps in order
 
@@ -56,16 +55,7 @@ If `get_variant.py` is not found, read `references/fallback.md`.
 
 ### Step 3 — Read and follow the instructions
 
-Read `.repo-autoresearch/autoresearch_instructions.md` before writing any code.
-Follow every rule in it. Common rules by variant:
-
-**baseline** — clear title, tests, focused diff, no debug code
-
-**compact_diff_v1** — strict rules:
-- Hard limit: 200 lines changed. Split if larger.
-- Title format: `type(scope): what changed`
-- Description must include: what / why / how to verify
-- Tests are mandatory — no PR without a test file
+Read `.repo-autoresearch/autoresearch_instructions.md` before writing any code (generated from `.repo-autoresearch/program.md` or variant files). Follow every rule in it — do not duplicate variant text here.
 
 If instructions conflict with an explicit user request, follow
 the user and note the deviation in the PR description.
@@ -123,5 +113,6 @@ Example:
 ## Files in this skill
 
 - `SKILL.md` — this file
-- `scripts/get_variant.py` — assigns variant, writes instructions to `.repo-autoresearch/`
 - `references/fallback.md` — manual variant assignment if script unavailable
+
+Repo root (not under `skill/`): `scripts/get_variant.py`, `AGENT.md`.
