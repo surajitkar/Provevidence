@@ -2,7 +2,7 @@
 
 ## Automatic promotion (optional)
 
-In `experiment.yaml`, set `promotion.auto_open_pr: true`. When an evaluation run recommends **PROMOTE** for a challenger, the workflow opens a pull request that copies the winner’s `program.md` section over the baseline section (same manual steps below, but scripted). The Gist state stores a fingerprint so the same evaluation outcome does not open duplicate PRs. Leave `auto_open_pr: false` (default) to review and merge instruction changes yourself.
+In `experiment.yaml`, set `promotion.auto_open_pr: true`. When an evaluation run recommends **PROMOTE** for a challenger, a **dedicated GitHub Actions job** (runs on PR close, after the main autoresearch job) opens a pull request that copies the winner’s `program.md` section over the baseline section (same manual steps below, but scripted). The Gist state stores a fingerprint so the same evaluation outcome does not open duplicate PRs. Leave `auto_open_pr: false` (default) to review and merge instruction changes yourself.
 
 ## Manual promotion
 

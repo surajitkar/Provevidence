@@ -77,6 +77,8 @@ Outcomes are stored in configured backend (Gist JSON or local `state.json`). **`
 
 **`.github/workflows/autoresearch.yml`** — triggers on PR events, reviews, and `check_suite: completed`. Requires secrets **`GIST_ID`** and **`GIST_TOKEN`** for Gist-backed state.
 
+The workflow uses **two jobs**: the main job has **`contents: read`** (evidence, state, comments). If **`promotion.auto_open_pr`** is enabled, a **second job** runs only when a PR **closes** (after the first job) with **`contents: write`** so it can open an optional promotion PR—narrower permission than granting write on every event.
+
 ### Key Design Constraints
 
 - **Hash the task ref, not PR number** — task ref exists before the agent writes code.

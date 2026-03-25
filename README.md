@@ -116,7 +116,7 @@ The gap between **variant assigned** and **PR opened** is intentional: the agent
 ```
 .github/
   workflows/
-    autoresearch.yml          GitHub Action — PR events, reviews, check_suite (CI)
+    autoresearch.yml          Two jobs: main (read) + optional auto-promote on PR close (write)
 
   copilot-instructions.md     Permanent agent instruction:
                               "run get_variant.py before writing code"
@@ -159,6 +159,7 @@ skill/
 | **`compliance`** | Optional PR-body **heuristics** (length, checklist hints) surfaced in the evidence comment — not a guarantee. |
 | **`ci_tracking`** | Optionally filter which GitHub **Check Runs** are stored on each PR (empty = record all). |
 | **CI accuracy** | The workflow listens for **`check_suite: completed`** so **first-pass CI** reflects the real suite result, not the initial open. |
+| **Actions permissions** | The main workflow job uses **`contents: read`**. A **second job** runs only when a PR **closes**, after the first job, with **`contents: write`**, so optional auto-promotion does not grant write access on every event. |
 | **`evidence_template`** | Per-variant template path referenced when building the evidence block. |
 | **`guardrails` / threshold** | `experiment.yaml` lists guardrail ideas; **promotion** in code uses **`promotion_threshold_pct`** on the primary metric plus a **CI pass-rate** check (challenger must not trail baseline by more than a few percentage points). |
 | **`draft-challenger`** | Optional CLI (`draft-challenger`) to help draft a new challenger variant; see [CLAUDE.md](CLAUDE.md). |

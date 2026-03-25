@@ -70,6 +70,19 @@ CHECK_CONCLUSION = os.environ.get("CHECK_CONCLUSION", "")
 CHECK_PR_NUMBERS = os.environ.get("CHECK_PR_NUMBERS", "[]")
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _skip_auto_promotion() -> bool:
+    """Main CI job sets this so contents:write is only used by the promotion job."""
+    return _env_truthy("AUTORESEARCH_SKIP_AUTO_PROMOTION")
+
+
+def _auto_promotion_only() -> bool:
+    """Dedicated job: contents:write; runs main_auto_promotion_only()."""
+    return _env_truthy("AUTORESEARCH_AUTO_PROMOTION_ONLY")
+
 HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json",
@@ -801,7 +814,44 @@ def handle_check_suite():
 # Main
 # ---------------------------------------------------------------------------
 
+def main_auto_promotion_only():
+    """
+    Invoked by a dedicated workflow job with contents:write.
+    Runs after the main autoresearch job on PR close; opens a promotion PR only if
+    experiment.yaml has promotion.auto_open_pr and evaluation recommends PROMOTE.
+    Does not duplicate record_outcome / report (main job already did that).
+    """
+    print(f"\nAutoresearch auto-promotion job — PR #{PR_NUMBER} action={PR_ACTION}")
+    if not PR_NUMBER:
+        print("No PR context — skipping.")
+        return
+    if PR_ACTION != "closed":
+        print("  Not a closed PR — skipping.")
+        return
+    experiment = load_experiment()
+    promo = experiment.get("promotion") or {}
+    if not promo.get("auto_open_pr", False):
+        print("  promotion.auto_open_pr is false — skipping auto-promotion job.")
+        return
+    state = load_state()
+    target_branches = experiment.get("cohort", {}).get("target_branches", ["main"])
+    if PR_BASE_BRANCH not in target_branches:
+        print(f"  Branch '{PR_BASE_BRANCH}' not in scope — skipping.")
+        return
+    decisions = evaluate_experiment(state, experiment)
+    if not decisions:
+        print("  No evaluation decisions — skipping auto-promotion.")
+        return
+    maybe_auto_promote_pr(state, experiment, decisions)
+    save_state(state)
+    print("  Auto-promotion job done.\n")
+
+
 def main():
+    if _auto_promotion_only():
+        main_auto_promotion_only()
+        return
+
     print(f"\nAutoresearch — PR #{PR_NUMBER} action={PR_ACTION} author={PR_AUTHOR}")
 
     # check_suite event — CI finished, record the real result
@@ -866,7 +916,8 @@ def main():
                 "experiment_name": experiment.get("name"),
             })
             print("  Experiment evaluated — report posted.")
-            maybe_auto_promote_pr(state, experiment, decisions)
+            if not _skip_auto_promotion():
+                maybe_auto_promote_pr(state, experiment, decisions)
 
     save_state(state)
     print("  Done.\n")

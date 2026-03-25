@@ -46,7 +46,7 @@ The **`guardrails:`** list in `experiment.yaml` documents intent and future dire
 ## GitHub Actions
 
 - **Secrets:** `GIST_ID` and `GIST_TOKEN` (PAT with `gist` scope) for state in a private Gist.
-- **Permissions:** `pull-requests: write`, `contents: write`, `issues: write`. **`contents: write`** is required when **`promotion.auto_open_pr`** is `true` so the workflow can create a branch and open a promotion PR.
+- **Permissions:** The default workflow job uses **`contents: read`** (evidence, Gist state, comments). A **second job** runs only on **`pull_request` `closed`**, after the main job, with **`contents: write`** so optional auto-promotion can create a branch and open a PR. That way elevated permission is not granted for every event type.
 - **Triggers:** `pull_request`, `pull_request_review`, `check_suite` (CI completion updates first-pass CI accurately).
 
 ## State storage
