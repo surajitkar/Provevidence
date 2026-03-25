@@ -16,6 +16,9 @@ What it does:
     3. Writes the instructions to .repo-autoresearch/autoresearch_instructions.md
     4. Prints the tracking tag the agent must include in the PR body
 
+Instructions load from instruction_source.program_file (variant sections) when
+use_program is true; otherwise from each variant's instruction_pack file.
+
 Same task ref always gets the same variant — no randomness.
 Works offline. No GitHub token needed.
 """
@@ -27,11 +30,15 @@ import sys
 import yaml
 from pathlib import Path
 
-ROOT            = Path(__file__).parent.parent.parent  # project root
-EXPERIMENT_FILE = ROOT / ".repo-autoresearch" / "experiment.yaml"
-OUT_FILE        = ROOT / ".repo-autoresearch" / "autoresearch_instructions.md"
 
-# ---------------------------------------------------------------------------
+def find_repo_root() -> Path:
+    """Walk up from cwd looking for .repo-autoresearch/experiment.yaml."""
+    cwd = Path.cwd()
+    for p in [cwd, *cwd.parents]:
+        if (p / ".repo-autoresearch" / "experiment.yaml").is_file():
+            return p
+    return cwd
+
 
 def slugify(text):
     """Normalise task text into a stable, hashable key."""
@@ -40,6 +47,7 @@ def slugify(text):
     text = re.sub(r"-+", "-", text).strip("-")
     return text[:80]
 
+
 def assign_variant(task_key, experiment):
     variants = experiment.get("variants", [])
     if not variants:
@@ -47,11 +55,36 @@ def assign_variant(task_key, experiment):
     idx = int(hashlib.md5(task_key.encode()).hexdigest(), 16) % len(variants)
     return variants[idx]
 
-def load_instructions(instruction_pack_ref):
-    path = ROOT / instruction_pack_ref
-    return path.read_text() if path.exists() else ""
 
-# ---------------------------------------------------------------------------
+def extract_variant_from_program(program_text: str, variant_id: str) -> str | None:
+    """Return markdown body for one VARIANT section in program.md."""
+    pattern = re.compile(
+        rf"<!--\s*VARIANT:\s*{re.escape(variant_id)}\s*-->\s*(.*?)(?=<!--\s*VARIANT:|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    m = pattern.search(program_text)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def load_variant_instructions(variant: dict, experiment: dict, root: Path) -> str:
+    src = experiment.get("instruction_source") or {}
+    use_program = src.get("use_program", True)
+    rel = src.get("program_file") or ".repo-autoresearch/program.md"
+    program_path = root / rel
+    if use_program and program_path.is_file():
+        text = program_path.read_text(encoding="utf-8")
+        block = extract_variant_from_program(text, variant["id"])
+        if block:
+            return block
+    pack = variant.get("instruction_pack") or ""
+    if pack:
+        p = root / pack
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+    return ""
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -68,54 +101,58 @@ def main():
     )
     args = parser.parse_args()
 
-    if not EXPERIMENT_FILE.exists():
+    root = find_repo_root()
+    experiment_file = root / ".repo-autoresearch" / "experiment.yaml"
+    out_file = root / ".repo-autoresearch" / "autoresearch_instructions.md"
+
+    if not experiment_file.is_file():
         if args.quiet:
             print("[autoresearch:unavailable]")
         else:
             print("No experiment.yaml found — autoresearch not set up in this repo.")
+            print("Run from the repository root (or run: autoresearch-init).")
             print("Raise the PR normally without a tag.")
         sys.exit(0)
 
-    with open(EXPERIMENT_FILE) as f:
+    with open(experiment_file, encoding="utf-8") as f:
         experiment = yaml.safe_load(f)
 
     task_key = slugify(args.task)
-    variant  = assign_variant(task_key, experiment)
+    variant = assign_variant(task_key, experiment)
 
     if not variant:
         print("No variants configured in experiment.yaml")
         sys.exit(1)
 
-    instructions = load_instructions(variant.get("instruction_pack", ""))
+    instructions = load_variant_instructions(variant, experiment, root)
     tag = f"[autoresearch:task={args.task}:variant={variant['id']}]"
 
-    # Write instructions to temp file for the agent to read
-    OUT_FILE.write_text(
+    out_file.write_text(
         f"# Autoresearch — active instructions\n"
         f"# Variant : {variant['id']}\n"
         f"# Task    : {args.task}\n\n"
         f"{instructions}\n\n"
         f"---\n"
-        f"Include this tag in your PR body:\n{tag}\n"
+        f"Include this tag in your PR body:\n{tag}\n",
+        encoding="utf-8",
     )
 
     if args.quiet:
         print(tag)
         return
 
-    # Human/agent-readable output
     width = 62
     print("=" * width)
-    print(f"  Autoresearch — variant assigned")
+    print("  Autoresearch — variant assigned")
     print("=" * width)
     print(f"  Task        : {args.task}")
     print(f"  Hash key    : {task_key}")
     print(f"  Variant     : {variant['id']}")
     print(f"  Experiment  : {experiment.get('name', 'unnamed')}")
     print()
-    print(f"  Instructions written to: {OUT_FILE}")
+    print(f"  Instructions written to: {out_file}")
     print()
-    print(f"  REQUIRED — include this tag in your PR body:")
+    print("  REQUIRED — include this tag in your PR body:")
     print(f"  {tag}")
     print()
     print("-" * width)
@@ -124,6 +161,7 @@ def main():
     for line in instructions.splitlines():
         print(f"  {line}")
     print("=" * width)
+
 
 if __name__ == "__main__":
     main()
