@@ -5,25 +5,28 @@
 
 name: review-churn-reduction-v1
 
-# Single-file instructions: variant sections live in program_file (see program.md).
-# If a section is missing, instruction_pack on the variant is used as fallback.
+# Where variant instructions live. Optional `instructions:` merges over this (same keys).
 instruction_source:
   use_program: true
   program_file: .repo-autoresearch/program.md
 
+# State: gist | local | auto (gist when GIST_ID+GIST_TOKEN exist, else local file).
+state:
+  backend: auto
+
+# Evidence block thresholds (heuristics for the PR comment).
+evidence:
+  large_diff_additions: 300
+  thin_body_chars: 50
+
 cohort:
-  # Which branches to watch for AI-generated PRs
   target_branches:
     - main
     - master
 
-# Optional: which GitHub Check Runs to store in Gist state under each pr_run.ci_checks.
-# If include_name_substrings is empty or omitted, every check run returned for the
-# commit is recorded (same jobs you see on the PR Checks tab).
 ci_tracking:
   include_name_substrings: []
 
-# Optional: simple PR-body compliance hints for the evidence block (heuristics, not a legal guarantee).
 compliance:
   pr_body_min_length: 50
   checklist:
@@ -32,31 +35,35 @@ compliance:
     - id: describes_verification
       hint: "Description should mention how to verify (tests, steps, or pytest)"
 
-# The metric you are optimising.
-# Options: review_round_trips | first_pass_ci_success | time_to_merge
-primary_metric: review_round_trips
+# First-class metrics (built-in fields are recorded by the Action; external via record-metric CLI).
+metrics:
+  review_round_trips:
+    direction: lower_is_better
+  first_pass_ci_success:
+    direction: higher_is_better
+  time_to_merge_hours:
+    direction: lower_is_better
+  revert_rate_7d:
+    direction: lower_is_better
+    source: external
 
-# Guardrails — the challenger must NOT violate these to be promoted.
-guardrails:
-  - first_pass_ci_success >= baseline - 0.03   # CI pass rate must not drop >3%
-  - revert_rate_7d <= baseline + 0.01           # Revert rate must not rise >1%
+# Promotion rule: primary metric + min PRs + guardrails (parsed expressions).
+evaluation:
+  metric: review_round_trips
+  min_improvement_pct: 15
+  min_prs: 20
+  guardrails:
+    - first_pass_ci_success >= baseline - 0.03
+    - revert_rate_7d <= baseline + 0.01
 
-# How many PRs per variant to collect before evaluating.
-# Raise to 20+ in production. Keep at 5 for initial testing.
+# Used when evaluation.min_prs is omitted (backward compatibility).
 evaluation_window:
   type: pr_count
   value: 20
 
-# Challenger must beat baseline by this % to be promoted.
-promotion_threshold_pct: 15
-
-# Optional: when true, an evaluation that recommends promotion opens a PR that copies the
-# winning variant section over the baseline in program_file (see PROMOTION.md).
 promotion:
   auto_open_pr: false
 
-# Variants — first entry is always the baseline (control group).
-# instruction_pack is optional fallback when program.md has no matching section.
 variants:
   - id: baseline
     instruction_pack: .repo-autoresearch/variants/baseline.md
@@ -65,8 +72,3 @@ variants:
   - id: compact_diff_v1
     instruction_pack: .repo-autoresearch/variants/compact-diff.md
     evidence_template: .repo-autoresearch/evidence-templates/standard.md
-
-  # Example: add a third variant when compact_diff_v1 becomes the new baseline
-  # - id: compact_diff_v2
-  #   instruction_pack: .repo-autoresearch/variants/compact-diff-v2.md
-  #   evidence_template: .repo-autoresearch/evidence-templates/standard.md

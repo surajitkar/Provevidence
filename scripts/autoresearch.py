@@ -37,7 +37,17 @@ import requests
 import yaml
 from pathlib import Path
 
-from scripts.get_variant import extract_variant_from_program, load_variant_instructions
+from scripts.experiment_metrics import (
+    evaluate_experiment,
+    primary_metric_label,
+    promotion_threshold_pct,
+    report_metric_section,
+)
+from scripts.get_variant import (
+    extract_variant_from_program,
+    load_variant_instructions,
+    merge_instruction_source,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -53,7 +63,7 @@ SUMMARY_FILE     = AUTORESEARCH_DIR / "reports" / "latest-summary.md"
 # Environment variables (injected by GitHub Actions)
 # ---------------------------------------------------------------------------
 
-GITHUB_TOKEN   = os.environ["GITHUB_TOKEN"]
+GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
 REPO           = os.environ.get("REPO_FULL_NAME", "")
 PR_NUMBER      = os.environ.get("PR_NUMBER", "")
 PR_ACTION      = os.environ.get("PR_ACTION", "")
@@ -201,8 +211,21 @@ GIST_HEADERS = {
 def _gist_available():
     return bool(GIST_ID and GIST_TOKEN)
 
-def load_state():
-    if _gist_available():
+
+def _use_gist_backend(experiment):
+    """Respect experiment.yaml state.backend: auto | gist | local."""
+    if experiment is None:
+        return _gist_available()
+    backend = (experiment.get("state") or {}).get("backend", "auto")
+    if backend == "local":
+        return False
+    if backend == "gist":
+        return bool(GIST_ID and GIST_TOKEN)
+    return _gist_available()
+
+
+def load_state(experiment=None):
+    if _use_gist_backend(experiment):
         state = _load_state_gist()
     else:
         state = _load_state_file()
@@ -210,8 +233,9 @@ def load_state():
     state.setdefault("promotion_decisions", [])
     return state
 
-def save_state(state):
-    if _gist_available():
+
+def save_state(state, experiment=None):
+    if _use_gist_backend(experiment):
         _save_state_gist(state)
     else:
         _save_state_file(state)
@@ -431,10 +455,16 @@ def generate_evidence_block(pr, files, check_runs, variant, instructions, task_r
     ci_icon   = "✅" if ci_ok else "⚠️"
     test_files = [f for f in touched if "test" in f.lower() or "spec" in f.lower()]
 
+    ev_cfg = experiment.get("evidence") or {}
+    large_diff = int(ev_cfg.get("large_diff_additions", 300))
+    thin_body = int(ev_cfg.get("thin_body_chars", 50))
+
     missing = []
-    if not test_files:        missing.append("no test files modified")
-    if additions > 300:       missing.append("large diff — consider splitting")
-    if not pr.get("body") or len(pr.get("body", "")) < 50:
+    if not test_files:
+        missing.append("no test files modified")
+    if additions > large_diff:
+        missing.append("large diff — consider splitting")
+    if not pr.get("body") or len(pr.get("body", "")) < thin_body:
         missing.append("PR description is thin")
 
     comp_summary, comp_rows = score_compliance_heuristics(pr.get("body"), experiment)
@@ -514,62 +544,22 @@ def record_outcome(state, pr_number, event, data):
         run["review_round_trips"] = run.get("review_round_trips", 0) + 1
     if event == "merged":
         run["merged_at"] = datetime.datetime.utcnow().isoformat()
+        oa = run.get("opened_at")
+        if oa:
+            try:
+                oa_s = str(oa).replace("Z", "+00:00")
+                me_s = str(run["merged_at"]).replace("Z", "+00:00")
+                opened = datetime.datetime.fromisoformat(oa_s)
+                merged = datetime.datetime.fromisoformat(me_s)
+                run["time_to_merge_hours"] = round(
+                    (merged - opened).total_seconds() / 3600.0, 2
+                )
+            except Exception:
+                run["time_to_merge_hours"] = None
 
 # ---------------------------------------------------------------------------
-# Experiment evaluation
+# Experiment evaluation (see scripts/experiment_metrics.py)
 # ---------------------------------------------------------------------------
-
-def evaluate_experiment(state, experiment):
-    variants  = experiment.get("variants", [])
-    if len(variants) < 2:
-        return None
-    min_prs   = experiment.get("evaluation_window", {}).get("value", 20)
-    primary   = experiment.get("primary_metric", "review_round_trips")
-    threshold = experiment.get("promotion_threshold_pct", 15)
-
-    by_variant = {}
-    for run in state.get("pr_runs", {}).values():
-        by_variant.setdefault(run.get("variant_id"), []).append(run)
-
-    baseline_id   = variants[0]["id"]
-    baseline_runs = by_variant.get(baseline_id, [])
-    if len(baseline_runs) < min_prs:
-        print(f"  Not enough data: baseline has {len(baseline_runs)}/{min_prs} PRs")
-        return None
-
-    def stats(runs):
-        metric = [r.get(primary, 0) for r in runs if r.get(primary) is not None]
-        ci     = [r.get("first_pass_ci_success", False) for r in runs]
-        return {
-            "count":        len(runs),
-            "avg_metric":   sum(metric) / len(metric) if metric else 0,
-            "ci_pass_rate": sum(ci) / len(ci) if ci else 0,
-        }
-
-    base      = stats(baseline_runs)
-    decisions = []
-    for v in variants[1:]:
-        vid  = v["id"]
-        runs = by_variant.get(vid, [])
-        if not runs:
-            continue
-        chal   = stats(runs)
-        improv = ((base["avg_metric"] - chal["avg_metric"]) / base["avg_metric"] * 100
-                  if base["avg_metric"] > 0 else 0)
-        ci_drop      = base["ci_pass_rate"] - chal["ci_pass_rate"]
-        guardrail_ok = ci_drop <= 0.03
-        decisions.append({
-            "variant_id":       vid,
-            "baseline_id":      baseline_id,
-            "improvement_pct":  round(improv, 1),
-            "promote":          improv >= threshold and guardrail_ok,
-            "guardrail_ok":     guardrail_ok,
-            "guardrail_notes":  ([f"CI pass rate dropped {ci_drop:.1%} (limit: 3%)"]
-                                 if not guardrail_ok else []),
-            "baseline_stats":   base,
-            "challenger_stats": chal,
-        })
-    return decisions or None
 
 def generate_report(decisions, experiment):
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -578,15 +568,22 @@ def generate_report(decisions, experiment):
         f"**Experiment:** `{experiment.get('name', 'unnamed')}`  ",
         f"**Generated:** {ts}", "",
     ]
+    pm = primary_metric_label(experiment)
+    th = promotion_threshold_pct(experiment)
     for d in decisions:
         icon = "PROMOTE" if d["promote"] else "REJECT"
         lines += [
             f"## {icon}: `{d['variant_id']}` vs `{d['baseline_id']}`", "",
-            f"- **Improvement:** {d['improvement_pct']:+.1f}% (need ≥{experiment.get('promotion_threshold_pct', 15)}%)",
+            f"- **Primary metric:** `{pm}` — improvement {d['improvement_pct']:+.1f}% (need ≥{th}%)",
             f"- **Guardrails:** {'passed' if d['guardrail_ok'] else 'FAILED — ' + '; '.join(d['guardrail_notes'])}",
-            f"- **Baseline:** {d['baseline_stats']['count']} PRs, avg {d['baseline_stats']['avg_metric']:.2f} review rounds, {d['baseline_stats']['ci_pass_rate']:.1%} CI pass rate",
-            f"- **Challenger:** {d['challenger_stats']['count']} PRs, avg {d['challenger_stats']['avg_metric']:.2f} review rounds, {d['challenger_stats']['ci_pass_rate']:.1%} CI pass rate", "",
+            f"- **Baseline:** {d['baseline_stats']['count']} PRs, avg {d['baseline_stats']['avg_metric']:.4f} ({pm}), {d['baseline_stats']['ci_pass_rate']:.1%} CI pass rate",
+            f"- **Challenger:** {d['challenger_stats']['count']} PRs, avg {d['challenger_stats']['avg_metric']:.4f} ({pm}), {d['challenger_stats']['ci_pass_rate']:.1%} CI pass rate",
         ]
+        extra = report_metric_section(d, experiment)
+        if extra:
+            lines.append("")
+            lines.extend(extra)
+        lines.append("")
         if d["promote"]:
             lines.append(f"> **Recommendation:** replace `{d['baseline_id']}` with `{d['variant_id']}` as the new baseline.")
         else:
@@ -712,7 +709,7 @@ def maybe_auto_promote_pr(state, experiment, decisions):
     if state.get("last_auto_promotion_fingerprint") == fp:
         print("  Auto-promotion: same decision fingerprint as last run — skipping.")
         return
-    src = experiment.get("instruction_source") or {}
+    src = merge_instruction_source(experiment)
     if not src.get("use_program", True):
         print("  Auto-promotion: instruction_source.use_program is false — skipping.")
         return
@@ -780,7 +777,7 @@ def handle_check_suite():
     ci_rows = serialize_check_runs_for_gist(filtered)
     recorded_at = datetime.datetime.utcnow().isoformat()
 
-    state = load_state()
+    state = load_state(experiment)
     updated_first_pass = []
     matched_pr = []
 
@@ -801,7 +798,7 @@ def handle_check_suite():
             updated_first_pass.append(pr_num)
 
     if matched_pr:
-        save_state(state)
+        save_state(state, experiment)
         n = len(ci_rows)
         print(
             f"  CI checks ({n}) + conclusion '{CHECK_CONCLUSION}' for PR(s): {matched_pr} "
@@ -833,7 +830,7 @@ def main_auto_promotion_only():
     if not promo.get("auto_open_pr", False):
         print("  promotion.auto_open_pr is false — skipping auto-promotion job.")
         return
-    state = load_state()
+    state = load_state(experiment)
     target_branches = experiment.get("cohort", {}).get("target_branches", ["main"])
     if PR_BASE_BRANCH not in target_branches:
         print(f"  Branch '{PR_BASE_BRANCH}' not in scope — skipping.")
@@ -843,7 +840,7 @@ def main_auto_promotion_only():
         print("  No evaluation decisions — skipping auto-promotion.")
         return
     maybe_auto_promote_pr(state, experiment, decisions)
-    save_state(state)
+    save_state(state, experiment)
     print("  Auto-promotion job done.\n")
 
 
@@ -864,7 +861,7 @@ def main():
         return
 
     experiment = load_experiment()
-    state      = load_state()
+    state      = load_state(experiment)
 
     target_branches = experiment.get("cohort", {}).get("target_branches", ["main"])
     if PR_BASE_BRANCH not in target_branches:
@@ -919,7 +916,7 @@ def main():
             if not _skip_auto_promotion():
                 maybe_auto_promote_pr(state, experiment, decisions)
 
-    save_state(state)
+    save_state(state, experiment)
     print("  Done.\n")
 
 if __name__ == "__main__":

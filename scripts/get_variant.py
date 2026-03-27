@@ -68,8 +68,17 @@ def extract_variant_from_program(program_text: str, variant_id: str) -> str | No
     return m.group(1).strip()
 
 
+def merge_instruction_source(experiment: dict) -> dict:
+    """Merge optional `instructions:` over `instruction_source:` (same keys)."""
+    base = dict(experiment.get("instruction_source") or {})
+    overlay = experiment.get("instructions")
+    if isinstance(overlay, dict):
+        base.update(overlay)
+    return base
+
+
 def load_variant_instructions(variant: dict, experiment: dict, root: Path) -> str:
-    src = experiment.get("instruction_source") or {}
+    src = merge_instruction_source(experiment)
     use_program = src.get("use_program", True)
     rel = src.get("program_file") or ".repo-autoresearch/program.md"
     program_path = root / rel

@@ -24,6 +24,8 @@ autoresearch        = "scripts.autoresearch:main"
 setup-test-repo     = "scripts.setup_test_repo:main"
 autoresearch-init   = "agent_prompt_autoresearch.init_cli:main"
 draft-challenger    = "scripts.draft_challenger:main"
+record-metric       = "scripts.record_metric:main"
+validate-autoresearch = "scripts.validate_autoresearch:main"
 
 [tool.setuptools]
 include-package-data = true

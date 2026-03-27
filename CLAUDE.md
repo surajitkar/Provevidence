@@ -41,13 +41,14 @@ python scripts/get_variant.py --task "PROJ-142" --quiet   # tag only
 
 # Local simulation (no GitHub token needed)
 python scripts/setup_test_repo.py --simulate
+python scripts/validate_autoresearch.py
 
 # Real GitHub repo setup
 export GITHUB_TOKEN=ghp_your_token
 python scripts/setup_test_repo.py --repo yourname/test-autoresearch
 ```
 
-CLI entry points (after `pip install -e .`): `get-variant`, `autoresearch`, `setup-test-repo`, `autoresearch-init`, `draft-challenger`.
+CLI entry points (after `pip install -e .`): `get-variant`, `autoresearch`, `record-metric`, `validate-autoresearch`, `setup-test-repo`, `autoresearch-init`, `draft-challenger`.
 
 ## Architecture
 

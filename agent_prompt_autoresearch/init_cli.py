@@ -98,11 +98,24 @@ def main() -> None:
             print(f"  Exists: {out_scripts} (use --force to replace scripts)")
         else:
             out_scripts.mkdir(parents=True, exist_ok=True)
-            for name in ("autoresearch.py", "get_variant.py", "draft_challenger.py"):
+            for name in (
+                "autoresearch.py",
+                "get_variant.py",
+                "draft_challenger.py",
+                "experiment_metrics.py",
+                "record_metric.py",
+                "validate_autoresearch.py",
+            ):
                 src = source_scripts / name
                 if src.is_file():
                     shutil.copy2(src, out_scripts / name)
-            print(f"  Wrote {out_scripts}/ (autoresearch, get_variant, draft_challenger)")
+            print(
+                f"  Wrote {out_scripts}/ "
+                "("
+                "autoresearch, get_variant, draft_challenger, experiment_metrics, "
+                "record_metric, validate_autoresearch"
+                ")"
+            )
 
     if args.with_workflow and source_workflow.is_file():
         wf = target / ".github" / "workflows" / "autoresearch.yml"

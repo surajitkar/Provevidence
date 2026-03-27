@@ -40,6 +40,7 @@ git clone https://github.com/YOUR_USERNAME/agent-prompt-autoresearch
 cd agent-prompt-autoresearch
 pip install PyYAML requests
 python scripts/setup_test_repo.py --simulate
+python scripts/validate_autoresearch.py
 ```
 
 ---
@@ -154,14 +155,14 @@ skill/
 
 | Area | What it does |
 |------|----------------|
-| **`instruction_source`** | Use **`program.md`** with `<!-- VARIANT: id -->` sections (default in this repo), or turn off and rely on per-variant files under `variants/`. |
-| **`primary_metric`** | Which numeric field on each PR run to optimize (default `review_round_trips`). The engine fills `review_round_trips` and `first_pass_ci_success`; using another name (e.g. `time_to_merge`) only works if your state records that field on each run. |
+| **`instruction_source` / `instructions`** | Use **`program.md`** with `<!-- VARIANT: id -->` sections (default in this repo), or turn off and rely on per-variant files under `variants/`. Optional **`instructions:`** merges over **`instruction_source:`** (same keys). |
+| **`metrics` / `evaluation`** | Declare fields and directions under `metrics:`; set the primary field, minimum PR count, improvement threshold, and parsed guardrail lines under `evaluation:` (legacy `primary_metric` + `promotion_threshold_pct` still work if `evaluation.metric` is omitted). |
 | **`compliance`** | Optional PR-body **heuristics** (length, checklist hints) surfaced in the evidence comment — not a guarantee. |
 | **`ci_tracking`** | Optionally filter which GitHub **Check Runs** are stored on each PR (empty = record all). |
 | **CI accuracy** | The workflow listens for **`check_suite: completed`** so **first-pass CI** reflects the real suite result, not the initial open. |
 | **Actions permissions** | The main workflow job uses **`contents: read`**. A **second job** runs only when a PR **closes**, after the first job, with **`contents: write`**, so optional auto-promotion does not grant write access on every event. |
 | **`evidence_template`** | Per-variant template path referenced when building the evidence block. |
-| **`guardrails` / threshold** | `experiment.yaml` lists guardrail ideas; **promotion** in code uses **`promotion_threshold_pct`** on the primary metric plus a **CI pass-rate** check (challenger must not trail baseline by more than a few percentage points). |
+| **`evaluation.guardrails`** | Expressions like `first_pass_ci_success >= baseline - 0.03` are evaluated against per-variant averages. Legacy configs without `evaluation:` keep the old **3% CI pass-rate** guardrail only. |
 | **`draft-challenger`** | Optional CLI (`draft-challenger`) to help draft a new challenger variant; see [CLAUDE.md](CLAUDE.md). |
 | **Editor integration** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) and Cursor rules point agents at [AGENT.md](AGENT.md) so the workflow is not duplicated. |
 
@@ -177,15 +178,28 @@ name: review-churn-reduction-v1
 cohort:
   target_branches: [main]
 
-primary_metric: review_round_trips
-promotion_threshold_pct: 15
+state:
+  backend: auto   # gist | local | auto
+
+metrics:
+  review_round_trips:
+    direction: lower_is_better
+  first_pass_ci_success:
+    direction: higher_is_better
+
+evaluation:
+  metric: review_round_trips
+  min_improvement_pct: 15
+  min_prs: 20
+  guardrails:
+    - first_pass_ci_success >= baseline - 0.03
 
 evaluation_window:
   type: pr_count
-  value: 20          # PRs per variant before evaluating
+  value: 20   # used if evaluation.min_prs is omitted
 
 # promotion:
-#   auto_open_pr: false   # set true to open a baseline-update PR when evaluation recommends PROMOTE
+#   auto_open_pr: false
 
 variants:
   - id: baseline
